@@ -1,0 +1,5 @@
+{
+  "vpin_threshold_mode": "percentile",
+  "min_vpin": 0.7,
+  "max_vpin": 1.0
+}

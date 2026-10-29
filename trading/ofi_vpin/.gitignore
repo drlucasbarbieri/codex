@@ -1,0 +1,5 @@
+*.dll
+dados/
+otimizacao*.json
+virtual_*.json
+__pycache__/

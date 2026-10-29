@@ -1,0 +1,8 @@
+{
+  "vpin_threshold_mode": ["percentile"],
+  "min_vpin": [0.5, 0.7, 0.9],
+  "min_ofi_z": [1.0, 1.5, 2.0, 2.5],
+  "absorption_delta_z": [0.0, 0.5, 1.0],
+  "min_stop_ticks": [6, 12, 24, 48],
+  "rr": [1.0, 1.5, 2.0]
+}

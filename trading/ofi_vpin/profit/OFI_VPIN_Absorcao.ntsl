@@ -1,325 +1,358 @@
 // =============================================================================
-// ABSORCAO POR AGRESSAO + VPIN  -  versao NTSL para o Editor de Estrategias do Profit
-// Adaptacao da estrategia OFI/VPIN em Python para barras do Profit.
+// ABSORCAO POR AGRESSAO + VPIN - NTSL (Editor de Estrategias do Profit) - v2
 //
 // Grafico recomendado: WIN (contrato atual), periodo de 1 minuto.
-// Quantidade de contratos: defina na aba de execucao/automacao do Profit.
+// Quantidade de contratos: defina na aba de execucao/automacao do Profit e
+// repita o mesmo numero no parametro QtdContratos.
 // Use primeiro em BACKTEST e depois no SIMULADOR antes de qualquer conta real.
 //
-// Diferencas para a versao Python (limites da NTSL):
-// - OFI exato precisa do book tick a tick, que nao existe no historico da NTSL.
-//   Aqui a absorcao e medida assim: agressao forte de um lado (saldo de agressao
-//   da barra) e o preco NAO cede (variacao do fechamento a favor).
-// - VPIN aproximado por barras: soma |agressao compradora - vendedora| dividida
-//   pelo volume agredido total das ultimas JanelaVPIN barras do dia.
-// - Limiares sao relativos (z-score em relacao a media exponencial), como no
-//   modo "percentile" da versao Python. O z-score e testado comparando quadrados,
-//   sem usar raiz quadrada.
-// - Resultado do dia e estimado pela propria estrategia (preco do stop/alvo ou
-//   abertura da barra seguinte) apenas para o limite de perda diaria.
+// Ideia: agressao forte de um lado e o preco NAO cede = alguem esta absorvendo.
+//   Compra: venda agressiva forte e o preco segurou ou subiu.
+//   Venda : compra agressiva forte e o preco segurou ou caiu.
+// O VPIN aproximado (desequilibrio da agressao sobre o volume agredido, media
+// exponencial das ultimas barras do dia) precisa estar acima da propria media.
+//
+// v2: todas as variaveis tem prefixo (n, f, b) para nao coincidir com nomes de
+// funcoes da NTSL (a v1 usava "delta", que e funcao de opcoes), e a sintaxe
+// usa so o basico da linguagem.
 // =============================================================================
 input
-  SpanEstatistica(100);        // barras da media/variancia exponencial
-  JanelaVPIN(30);              // barras do VPIN aproximado (recomeca a cada dia)
-  DeltaZMin(1.5);              // forca minima da agressao contraria (z, >= 0)
-  RespostaZMin(0.0);           // resposta minima do preco a favor (z, >= 0)
-  VPINZMin(0.5);               // VPIN acima da propria media (z, >= 0)
-  StopPontos(150);             // stop em pontos a partir do preco de entrada
-  AlvoPontos(225);             // alvo em pontos a partir do preco de entrada
-  FolgaStopPontos(50);         // folga do preco limite da ordem stop
+  SpanEstatistica(100);     // barras das medias de referencia
+  JanelaVPIN(30);           // barras do VPIN aproximado
+  ForcaAgressaoMin(1.5);    // forca minima da agressao, em desvios (>= 0)
+  RespostaPrecoMin(0.0);    // resposta minima do preco, em desvios (>= 0)
+  ForcaVPINMin(0.5);        // VPIN acima da propria media, em desvios (>= 0)
+  StopPontos(150);          // stop em pontos a partir da entrada
+  AlvoPontos(225);          // alvo em pontos a partir da entrada
+  FolgaStopPontos(50);      // folga do preco limite da ordem stop
   MaxOperacoesDia(4);
-  PerdaMaxDiaReais(600.0);     // para de abrir operacoes ao atingir esta perda estimada
-  ValorPonto(0.20);            // WIN: R$ 0,20 por ponto por contrato
-  Contratos(1);                // mesmo numero da aba de execucao (so para o calculo de perda)
-  CustoPorContratoReais(5.5);  // corretagem + slippage estimado, ida e volta
+  PerdaMaxDiaReais(600.0);  // para de abrir operacoes ao estimar esta perda no dia
+  ValorDoPonto(0.20);       // WIN: R$ 0,20 por ponto por contrato
+  QtdContratos(1);          // so para a conta da perda do dia
+  CustoPorContrato(5.5);    // corretagem + slippage estimado, ida e volta, em R$
   HoraInicio(905);
   HoraUltimaEntrada(1645);
   HoraZeragem(1700);
-  UsarTendencia(false);        // true = exige MACD e T3 a favor
+  UsarTendencia(0);         // 1 = exige MACD e T3 a favor; 0 = desligado
   PeriodoT3(5);
   FatorT3(0.7);
 
 var
-  iniciado : Boolean;
-  barrasDia : Integer;
-  operacoesDia : Integer;
-  resultadoDia : Float;
-  posAnterior : Integer;
-  saidaMercado : Boolean;
-  entradaAtual : Float;
-  stopAtual : Float;
-  alvoAtual : Float;
-  saida : Float;
-  agrCompra : Float;
-  agrVenda : Float;
-  delta : Float;
-  retorno : Float;
-  i : Integer;
-  dif : Float;
-  somaDesb : Float;
-  somaVol : Float;
-  vpin : Float;
-  alfa : Float;
+  nIniciado : Integer;
+  nBarrasDia : Integer;
+  nOperacoesDia : Integer;
+  nPosAnterior : Integer;
+  nPosAtual : Integer;
+  nSaidaMercado : Integer;
   nObs : Integer;
-  nVpin : Integer;
-  mDelta : Float;
-  vDelta : Float;
-  mRet : Float;
-  vRet : Float;
-  mVpin : Float;
-  vVpin : Float;
-  dd : Float;
-  dr : Float;
-  dv : Float;
-  deltaVendaForte : Boolean;
-  deltaCompraForte : Boolean;
-  respostaAlta : Boolean;
-  respostaBaixa : Boolean;
-  vpinAlto : Boolean;
-  sinalCompra : Boolean;
-  sinalVenda : Boolean;
-  ema12 : Float;
-  ema26 : Float;
-  macdLinha : Float;
-  macdSinal : Float;
-  histMacd : Float;
-  k : Float;
-  a : Float;
-  c1 : Float;
-  c2 : Float;
-  c3 : Float;
-  c4 : Float;
-  e1 : Float;
-  e2 : Float;
-  e3 : Float;
-  e4 : Float;
-  e5 : Float;
-  e6 : Float;
-  t3 : Float;
+  nObsVpin : Integer;
+  nTemVpin : Integer;
+  bVendaForte : Boolean;
+  bCompraForte : Boolean;
+  bPrecoSegurouAlta : Boolean;
+  bPrecoSegurouBaixa : Boolean;
+  bVpinAlto : Boolean;
+  bSinalCompra : Boolean;
+  bSinalVenda : Boolean;
+  bPodeEntrar : Boolean;
+  fDataAnterior : Float;
+  fFechAnterior : Float;
+  fResultadoDia : Float;
+  fEntrada : Float;
+  fStop : Float;
+  fAlvo : Float;
+  fSaida : Float;
+  fAgrCompra : Float;
+  fAgrVenda : Float;
+  fSaldo : Float;
+  fVariacao : Float;
+  fDesb : Float;
+  fDecai : Float;
+  fSomaDesb : Float;
+  fSomaVol : Float;
+  fVpin : Float;
+  fAlfa : Float;
+  fMediaSaldo : Float;
+  fVarSaldo : Float;
+  fMediaVar : Float;
+  fVarVar : Float;
+  fMediaVpin : Float;
+  fVarVpin : Float;
+  fDifSaldo : Float;
+  fDifVar : Float;
+  fDifVpin : Float;
+  fLimSaldo : Float;
+  fLimVar : Float;
+  fLimVpin : Float;
+  fEma12 : Float;
+  fEma26 : Float;
+  fMacdLinha : Float;
+  fMacdSinal : Float;
+  fHistMacd : Float;
+  fKT3 : Float;
+  fFat : Float;
+  fT3E1 : Float;
+  fT3E2 : Float;
+  fT3E3 : Float;
+  fT3E4 : Float;
+  fT3E5 : Float;
+  fT3E6 : Float;
+  fCoef1 : Float;
+  fCoef2 : Float;
+  fCoef3 : Float;
+  fCoef4 : Float;
+  fValorT3 : Float;
 
 begin
-  // ---------- 1. Inicializacao e troca de dia ----------
-  if not iniciado then
+  // ---------- 1. Primeira barra ----------
+  if nIniciado = 0 then
   begin
-    iniciado := true;
-    nObs := 0;
-    nVpin := 0;
-    posAnterior := 0;
-    saidaMercado := false;
-    ema12 := Close;
-    ema26 := Close;
-    macdSinal := 0;
-    e1 := Close;
-    e2 := Close;
-    e3 := Close;
-    e4 := Close;
-    e5 := Close;
-    e6 := Close;
+    nIniciado := 1;
+    fFechAnterior := Close;
+    fEma12 := Close;
+    fEma26 := Close;
+    fT3E1 := Close;
+    fT3E2 := Close;
+    fT3E3 := Close;
+    fT3E4 := Close;
+    fT3E5 := Close;
+    fT3E6 := Close;
   end;
 
-  if Date <> Date[1] then
+  // ---------- 2. Troca de dia ----------
+  if Date <> fDataAnterior then
   begin
-    barrasDia := 0;
-    operacoesDia := 0;
-    resultadoDia := 0;
+    nBarrasDia := 0;
+    nOperacoesDia := 0;
+    fResultadoDia := 0;
+    fSomaDesb := 0;
+    fSomaVol := 0;
   end;
-  barrasDia := barrasDia + 1;
+  fDataAnterior := Date;
+  nBarrasDia := nBarrasDia + 1;
 
-  // ---------- 2. Resultado estimado da operacao encerrada nesta barra ----------
-  if (posAnterior = 1) and (not IsBought) then
-  begin
-    if saidaMercado then
-      saida := Open
-    else if Open <= stopAtual then
-      saida := Open
-    else if Low <= stopAtual then
-      saida := stopAtual
-    else if High >= alvoAtual then
-      saida := alvoAtual
-    else
-      saida := Close;
-    resultadoDia := resultadoDia + ((saida - entradaAtual) * ValorPonto - CustoPorContratoReais) * Contratos;
-  end;
+  // ---------- 3. Posicao atual: 0 = zerado, 1 = comprado, 2 = vendido ----------
+  nPosAtual := 0;
+  if IsBought then
+    nPosAtual := 1;
+  if IsSold then
+    nPosAtual := 2;
 
-  if (posAnterior = -1) and (not IsSold) then
+  // ---------- 4. Resultado estimado da operacao encerrada nesta barra ----------
+  if (nPosAnterior = 1) and (nPosAtual <> 1) then
   begin
-    if saidaMercado then
-      saida := Open
-    else if Open >= stopAtual then
-      saida := Open
-    else if High >= stopAtual then
-      saida := stopAtual
-    else if Low <= alvoAtual then
-      saida := alvoAtual
-    else
-      saida := Close;
-    resultadoDia := resultadoDia + ((entradaAtual - saida) * ValorPonto - CustoPorContratoReais) * Contratos;
+    fSaida := Close;
+    if nSaidaMercado = 1 then
+      fSaida := Open
+    else if Open <= fStop then
+      fSaida := Open
+    else if Low <= fStop then
+      fSaida := fStop
+    else if High >= fAlvo then
+      fSaida := fAlvo;
+    fResultadoDia := fResultadoDia + ((fSaida - fEntrada) * ValorDoPonto - CustoPorContrato) * QtdContratos;
   end;
 
-  // ---------- 3. Fluxo de agressao da barra ----------
-  agrCompra := AgressionVolBuy;
-  agrVenda := AgressionVolSell;
-  delta := agrCompra - agrVenda;
-  retorno := Close - Close[1];
-
-  // ---------- 4. VPIN aproximado (so com barras do dia) ----------
-  vpin := -1;
-  if barrasDia >= JanelaVPIN then
+  if (nPosAnterior = 2) and (nPosAtual <> 2) then
   begin
-    somaDesb := 0;
-    somaVol := 0;
-    for i := 0 to JanelaVPIN - 1 do
-    begin
-      dif := agrCompra[i] - agrVenda[i];
-      if dif < 0 then
-        dif := -1.0 * dif;
-      somaDesb := somaDesb + dif;
-      somaVol := somaVol + agrCompra[i] + agrVenda[i];
-    end;
-    if somaVol > 0 then
-      vpin := somaDesb / somaVol;
+    fSaida := Close;
+    if nSaidaMercado = 1 then
+      fSaida := Open
+    else if Open >= fStop then
+      fSaida := Open
+    else if High >= fStop then
+      fSaida := fStop
+    else if Low <= fAlvo then
+      fSaida := fAlvo;
+    fResultadoDia := fResultadoDia + ((fEntrada - fSaida) * ValorDoPonto - CustoPorContrato) * QtdContratos;
   end;
 
-  // ---------- 5. Forca relativa (z-score comparando quadrados) ----------
-  dd := delta - mDelta;
-  dr := retorno - mRet;
-  deltaVendaForte := (nObs >= 5) and (dd < 0) and (dd * dd >= DeltaZMin * DeltaZMin * vDelta);
-  deltaCompraForte := (nObs >= 5) and (dd > 0) and (dd * dd >= DeltaZMin * DeltaZMin * vDelta);
-  respostaAlta := (nObs >= 5) and (dr >= 0) and (dr * dr >= RespostaZMin * RespostaZMin * vRet);
-  respostaBaixa := (nObs >= 5) and (dr <= 0) and (dr * dr >= RespostaZMin * RespostaZMin * vRet);
+  // ---------- 5. Agressao da barra e variacao do preco ----------
+  fAgrCompra := AgressionVolBuy;
+  fAgrVenda := AgressionVolSell;
+  fSaldo := fAgrCompra - fAgrVenda;
+  fVariacao := Close - fFechAnterior;
 
-  vpinAlto := false;
-  dv := 0;
-  if vpin >= 0 then
+  // ---------- 6. VPIN aproximado (recomeca a cada dia) ----------
+  fDesb := fSaldo;
+  if fDesb < 0 then
+    fDesb := 0 - fDesb;
+  fDecai := 1.0 - 2.0 / (JanelaVPIN + 1.0);
+  fSomaDesb := fDecai * fSomaDesb + fDesb;
+  fSomaVol := fDecai * fSomaVol + fAgrCompra + fAgrVenda;
+  nTemVpin := 0;
+  fVpin := 0;
+  if (nBarrasDia >= JanelaVPIN) and (fSomaVol > 0) then
   begin
-    dv := vpin - mVpin;
-    vpinAlto := (nVpin >= 5) and (dv >= 0) and (dv * dv >= VPINZMin * VPINZMin * vVpin);
+    fVpin := fSomaDesb / fSomaVol;
+    nTemVpin := 1;
   end;
 
-  // ---------- 6. Atualiza estatisticas depois de usar (sem olhar o futuro) ----------
-  alfa := 2.0 / (SpanEstatistica + 1.0);
-  if barrasDia > 1 then
+  // ---------- 7. Forca em relacao a media (compara quadrados, sem raiz) ----------
+  fDifSaldo := fSaldo - fMediaSaldo;
+  fDifVar := fVariacao - fMediaVar;
+  fLimSaldo := ForcaAgressaoMin * ForcaAgressaoMin * fVarSaldo;
+  fLimVar := RespostaPrecoMin * RespostaPrecoMin * fVarVar;
+  bVendaForte := false;
+  bCompraForte := false;
+  bPrecoSegurouAlta := false;
+  bPrecoSegurouBaixa := false;
+  if (nObs >= 5) and (nBarrasDia > 1) then
+  begin
+    if (fDifSaldo < 0) and (fDifSaldo * fDifSaldo >= fLimSaldo) then
+      bVendaForte := true;
+    if (fDifSaldo > 0) and (fDifSaldo * fDifSaldo >= fLimSaldo) then
+      bCompraForte := true;
+    if (fDifVar >= 0) and (fDifVar * fDifVar >= fLimVar) then
+      bPrecoSegurouAlta := true;
+    if (fDifVar <= 0) and (fDifVar * fDifVar >= fLimVar) then
+      bPrecoSegurouBaixa := true;
+  end;
+
+  bVpinAlto := false;
+  fDifVpin := 0;
+  if nTemVpin = 1 then
+  begin
+    fDifVpin := fVpin - fMediaVpin;
+    fLimVpin := ForcaVPINMin * ForcaVPINMin * fVarVpin;
+    if (nObsVpin >= 5) and (fDifVpin >= 0) and (fDifVpin * fDifVpin >= fLimVpin) then
+      bVpinAlto := true;
+  end;
+
+  // ---------- 8. Atualiza as medias depois de usar (sem olhar o futuro) ----------
+  fAlfa := 2.0 / (SpanEstatistica + 1.0);
+  if nBarrasDia > 1 then
   begin
     if nObs = 0 then
     begin
-      mDelta := delta;
-      vDelta := 0;
-      mRet := retorno;
-      vRet := 0;
+      fMediaSaldo := fSaldo;
+      fVarSaldo := 0;
+      fMediaVar := fVariacao;
+      fVarVar := 0;
     end
     else
     begin
-      mDelta := mDelta + alfa * dd;
-      vDelta := (1.0 - alfa) * (vDelta + alfa * dd * dd);
-      mRet := mRet + alfa * dr;
-      vRet := (1.0 - alfa) * (vRet + alfa * dr * dr);
+      fMediaSaldo := fMediaSaldo + fAlfa * fDifSaldo;
+      fVarSaldo := (1.0 - fAlfa) * (fVarSaldo + fAlfa * fDifSaldo * fDifSaldo);
+      fMediaVar := fMediaVar + fAlfa * fDifVar;
+      fVarVar := (1.0 - fAlfa) * (fVarVar + fAlfa * fDifVar * fDifVar);
     end;
     nObs := nObs + 1;
   end;
 
-  if vpin >= 0 then
+  if nTemVpin = 1 then
   begin
-    if nVpin = 0 then
+    if nObsVpin = 0 then
     begin
-      mVpin := vpin;
-      vVpin := 0;
+      fMediaVpin := fVpin;
+      fVarVpin := 0;
     end
     else
     begin
-      mVpin := mVpin + alfa * dv;
-      vVpin := (1.0 - alfa) * (vVpin + alfa * dv * dv);
+      fMediaVpin := fMediaVpin + fAlfa * fDifVpin;
+      fVarVpin := (1.0 - fAlfa) * (fVarVpin + fAlfa * fDifVpin * fDifVpin);
     end;
-    nVpin := nVpin + 1;
+    nObsVpin := nObsVpin + 1;
   end;
 
-  // ---------- 7. Filtros de tendencia opcionais: MACD(12,26,9) e T3 ----------
-  ema12 := ema12 + (2.0 / 13.0) * (Close - ema12);
-  ema26 := ema26 + (2.0 / 27.0) * (Close - ema26);
-  macdLinha := ema12 - ema26;
-  macdSinal := macdSinal + (2.0 / 10.0) * (macdLinha - macdSinal);
-  histMacd := macdLinha - macdSinal;
+  // ---------- 9. Filtro de tendencia opcional: MACD(12,26,9) e T3 ----------
+  fEma12 := fEma12 + (2.0 / 13.0) * (Close - fEma12);
+  fEma26 := fEma26 + (2.0 / 27.0) * (Close - fEma26);
+  fMacdLinha := fEma12 - fEma26;
+  fMacdSinal := fMacdSinal + (2.0 / 10.0) * (fMacdLinha - fMacdSinal);
+  fHistMacd := fMacdLinha - fMacdSinal;
 
-  k := 2.0 / (PeriodoT3 + 1.0);
-  e1 := e1 + k * (Close - e1);
-  e2 := e2 + k * (e1 - e2);
-  e3 := e3 + k * (e2 - e3);
-  e4 := e4 + k * (e3 - e4);
-  e5 := e5 + k * (e4 - e5);
-  e6 := e6 + k * (e5 - e6);
-  a := FatorT3;
-  c1 := -1.0 * a * a * a;
-  c2 := 3.0 * a * a + 3.0 * a * a * a;
-  c3 := -6.0 * a * a - 3.0 * a - 3.0 * a * a * a;
-  c4 := 1.0 + 3.0 * a + a * a * a + 3.0 * a * a;
-  t3 := c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
+  fKT3 := 2.0 / (PeriodoT3 + 1.0);
+  fT3E1 := fT3E1 + fKT3 * (Close - fT3E1);
+  fT3E2 := fT3E2 + fKT3 * (fT3E1 - fT3E2);
+  fT3E3 := fT3E3 + fKT3 * (fT3E2 - fT3E3);
+  fT3E4 := fT3E4 + fKT3 * (fT3E3 - fT3E4);
+  fT3E5 := fT3E5 + fKT3 * (fT3E4 - fT3E5);
+  fT3E6 := fT3E6 + fKT3 * (fT3E5 - fT3E6);
+  fFat := FatorT3;
+  fCoef1 := 0 - fFat * fFat * fFat;
+  fCoef2 := 3.0 * fFat * fFat + 3.0 * fFat * fFat * fFat;
+  fCoef3 := 0 - 6.0 * fFat * fFat - 3.0 * fFat - 3.0 * fFat * fFat * fFat;
+  fCoef4 := 1.0 + 3.0 * fFat + fFat * fFat * fFat + 3.0 * fFat * fFat;
+  fValorT3 := fCoef1 * fT3E6 + fCoef2 * fT3E5 + fCoef3 * fT3E4 + fCoef4 * fT3E3;
 
-  // ---------- 8. Sinais de absorcao ----------
-  // Compra: venda agressiva forte, mas o preco segurou ou subiu (compradores absorvendo).
-  sinalCompra := deltaVendaForte and respostaAlta and vpinAlto;
-  // Venda: compra agressiva forte, mas o preco segurou ou caiu (vendedores absorvendo).
-  sinalVenda := deltaCompraForte and respostaBaixa and vpinAlto;
-  if UsarTendencia then
+  // ---------- 10. Sinais de absorcao ----------
+  bSinalCompra := false;
+  bSinalVenda := false;
+  if bVendaForte and bPrecoSegurouAlta and bVpinAlto then
+    bSinalCompra := true;
+  if bCompraForte and bPrecoSegurouBaixa and bVpinAlto then
+    bSinalVenda := true;
+  if UsarTendencia = 1 then
   begin
-    sinalCompra := sinalCompra and (histMacd >= 0) and (Close >= t3);
-    sinalVenda := sinalVenda and (histMacd <= 0) and (Close <= t3);
+    if (fHistMacd < 0) or (Close < fValorT3) then
+      bSinalCompra := false;
+    if (fHistMacd > 0) or (Close > fValorT3) then
+      bSinalVenda := false;
   end;
 
-  // ---------- 9. Gestao da posicao e entradas ----------
-  if IsBought then
+  // ---------- 11. Posicao comprada: stop, alvo e zeragem ----------
+  if nPosAtual = 1 then
   begin
-    entradaAtual := BuyPrice;
-    stopAtual := entradaAtual - StopPontos;
-    alvoAtual := entradaAtual + AlvoPontos;
+    fEntrada := BuyPrice;
+    fStop := fEntrada - StopPontos;
+    fAlvo := fEntrada + AlvoPontos;
     if Time >= HoraZeragem then
     begin
       SellToCoverAtMarket;
-      saidaMercado := true;
+      nSaidaMercado := 1;
     end
     else
     begin
-      SellToCoverStop(stopAtual, stopAtual - FolgaStopPontos);
-      SellToCoverLimit(alvoAtual);
+      SellToCoverStop(fStop, fStop - FolgaStopPontos);
+      SellToCoverLimit(fAlvo);
     end;
-  end
-  else if IsSold then
+  end;
+
+  // ---------- 12. Posicao vendida: stop, alvo e zeragem ----------
+  if nPosAtual = 2 then
   begin
-    entradaAtual := SellPrice;
-    stopAtual := entradaAtual + StopPontos;
-    alvoAtual := entradaAtual - AlvoPontos;
+    fEntrada := SellPrice;
+    fStop := fEntrada + StopPontos;
+    fAlvo := fEntrada - AlvoPontos;
     if Time >= HoraZeragem then
     begin
       BuyToCoverAtMarket;
-      saidaMercado := true;
+      nSaidaMercado := 1;
     end
     else
     begin
-      BuyToCoverStop(stopAtual, stopAtual + FolgaStopPontos);
-      BuyToCoverLimit(alvoAtual);
+      BuyToCoverStop(fStop, fStop + FolgaStopPontos);
+      BuyToCoverLimit(fAlvo);
     end;
-  end
-  else
+  end;
+
+  // ---------- 13. Zerado: entradas ----------
+  if nPosAtual = 0 then
   begin
-    saidaMercado := false;
-    if (Time >= HoraInicio) and (Time < HoraUltimaEntrada) and (operacoesDia < MaxOperacoesDia)
-       and (resultadoDia > -1.0 * PerdaMaxDiaReais) then
+    nSaidaMercado := 0;
+    bPodeEntrar := false;
+    if (Time >= HoraInicio) and (Time < HoraUltimaEntrada) then
+      bPodeEntrar := true;
+    if nOperacoesDia >= MaxOperacoesDia then
+      bPodeEntrar := false;
+    if fResultadoDia + PerdaMaxDiaReais <= 0 then
+      bPodeEntrar := false;
+    if bPodeEntrar then
     begin
-      if sinalCompra then
+      if bSinalCompra then
       begin
         BuyAtMarket;
-        operacoesDia := operacoesDia + 1;
+        nOperacoesDia := nOperacoesDia + 1;
       end
-      else if sinalVenda then
+      else if bSinalVenda then
       begin
         SellShortAtMarket;
-        operacoesDia := operacoesDia + 1;
+        nOperacoesDia := nOperacoesDia + 1;
       end;
     end;
   end;
 
-  if IsBought then
-    posAnterior := 1
-  else if IsSold then
-    posAnterior := -1
-  else
-    posAnterior := 0;
+  nPosAnterior := nPosAtual;
+  fFechAnterior := Close;
 end;

@@ -1,7 +1,9 @@
 // =============================================================================
-// ABSORCAO POR AGRESSAO + VPIN - NTSL (Editor de Estrategias do Profit) - v2
+// ABSORCAO POR AGRESSAO + VPIN - NTSL (Editor de Estrategias do Profit) - v3
 //
 // Grafico recomendado: WIN (contrato atual), periodo de 1 minuto.
+// Rode o backtest com varios dias (pelo menos 5): a estrategia faz poucas
+// entradas por dia e em menos de um pregao pode nao aparecer nenhuma.
 // Quantidade de contratos: defina na aba de execucao/automacao do Profit e
 // repita o mesmo numero no parametro QtdContratos.
 // Use primeiro em BACKTEST e depois no SIMULADOR antes de qualquer conta real.
@@ -10,18 +12,22 @@
 //   Compra: venda agressiva forte e o preco segurou ou subiu.
 //   Venda : compra agressiva forte e o preco segurou ou caiu.
 // O VPIN aproximado (desequilibrio da agressao sobre o volume agredido, media
-// exponencial das ultimas barras do dia) precisa estar acima da propria media.
+// exponencial das ultimas barras) precisa estar na propria media ou acima.
 //
-// v2: todas as variaveis tem prefixo (n, f, b) para nao coincidir com nomes de
-// funcoes da NTSL (a v1 usava "delta", que e funcao de opcoes), e a sintaxe
-// usa so o basico da linguagem.
+// v3: filtros padrao mais frouxos, VPIN sem reinicio diario, hora aceita HHMM
+// ou HHMMSS, e ModoTeste para descobrir por que nao ha entradas.
+//
+// ModoTeste(1): ignora os filtros e faz UMA operacao por dia, na segunda barra:
+//   COMPRA = o Profit entregou dado de agressao naquele dia;
+//   VENDA  = nao entregou (sem esse dado a estrategia normal nunca entra).
+// Serve so para diagnostico; o resultado desse modo nao avalia a estrategia.
 // =============================================================================
 input
   SpanEstatistica(100);     // barras das medias de referencia
   JanelaVPIN(30);           // barras do VPIN aproximado
-  ForcaAgressaoMin(1.5);    // forca minima da agressao, em desvios (>= 0)
+  ForcaAgressaoMin(0.5);    // forca minima da agressao, em desvios (maior = menos entradas)
   RespostaPrecoMin(0.0);    // resposta minima do preco, em desvios (>= 0)
-  ForcaVPINMin(0.5);        // VPIN acima da propria media, em desvios (>= 0)
+  ForcaVPINMin(0.0);        // VPIN acima da propria media, em desvios (maior = menos entradas)
   StopPontos(150);          // stop em pontos a partir da entrada
   AlvoPontos(225);          // alvo em pontos a partir da entrada
   FolgaStopPontos(50);      // folga do preco limite da ordem stop
@@ -36,9 +42,11 @@ input
   UsarTendencia(0);         // 1 = exige MACD e T3 a favor; 0 = desligado
   PeriodoT3(5);
   FatorT3(0.7);
+  ModoTeste(0);             // 1 = teste de diagnostico (ver explicacao acima)
 
 var
   nIniciado : Integer;
+  nBarrasTotal : Integer;
   nBarrasDia : Integer;
   nOperacoesDia : Integer;
   nPosAnterior : Integer;
@@ -55,6 +63,7 @@ var
   bSinalCompra : Boolean;
   bSinalVenda : Boolean;
   bPodeEntrar : Boolean;
+  fHora : Float;
   fDataAnterior : Float;
   fFechAnterior : Float;
   fResultadoDia : Float;
@@ -64,6 +73,7 @@ var
   fSaida : Float;
   fAgrCompra : Float;
   fAgrVenda : Float;
+  fAgrDia : Float;
   fSaldo : Float;
   fVariacao : Float;
   fDesb : Float;
@@ -119,17 +129,21 @@ begin
     fT3E6 := Close;
   end;
 
-  // ---------- 2. Troca de dia ----------
+  // ---------- 2. Hora da barra em HHMM (aceita HHMMSS) e troca de dia ----------
+  fHora := Time;
+  if fHora > 2359 then
+    fHora := fHora / 100;
+
   if Date <> fDataAnterior then
   begin
     nBarrasDia := 0;
     nOperacoesDia := 0;
     fResultadoDia := 0;
-    fSomaDesb := 0;
-    fSomaVol := 0;
+    fAgrDia := 0;
   end;
   fDataAnterior := Date;
   nBarrasDia := nBarrasDia + 1;
+  nBarrasTotal := nBarrasTotal + 1;
 
   // ---------- 3. Posicao atual: 0 = zerado, 1 = comprado, 2 = vendido ----------
   nPosAtual := 0;
@@ -170,10 +184,11 @@ begin
   // ---------- 5. Agressao da barra e variacao do preco ----------
   fAgrCompra := AgressionVolBuy;
   fAgrVenda := AgressionVolSell;
+  fAgrDia := fAgrDia + fAgrCompra + fAgrVenda;
   fSaldo := fAgrCompra - fAgrVenda;
   fVariacao := Close - fFechAnterior;
 
-  // ---------- 6. VPIN aproximado (recomeca a cada dia) ----------
+  // ---------- 6. VPIN aproximado ----------
   fDesb := fSaldo;
   if fDesb < 0 then
     fDesb := 0 - fDesb;
@@ -182,7 +197,7 @@ begin
   fSomaVol := fDecai * fSomaVol + fAgrCompra + fAgrVenda;
   nTemVpin := 0;
   fVpin := 0;
-  if (nBarrasDia >= JanelaVPIN) and (fSomaVol > 0) then
+  if (nBarrasTotal >= JanelaVPIN) and (fSomaVol > 0) then
   begin
     fVpin := fSomaDesb / fSomaVol;
     nTemVpin := 1;
@@ -297,7 +312,7 @@ begin
     fEntrada := BuyPrice;
     fStop := fEntrada - StopPontos;
     fAlvo := fEntrada + AlvoPontos;
-    if Time >= HoraZeragem then
+    if fHora >= HoraZeragem then
     begin
       SellToCoverAtMarket;
       nSaidaMercado := 1;
@@ -315,7 +330,7 @@ begin
     fEntrada := SellPrice;
     fStop := fEntrada + StopPontos;
     fAlvo := fEntrada - AlvoPontos;
-    if Time >= HoraZeragem then
+    if fHora >= HoraZeragem then
     begin
       BuyToCoverAtMarket;
       nSaidaMercado := 1;
@@ -331,24 +346,39 @@ begin
   if nPosAtual = 0 then
   begin
     nSaidaMercado := 0;
-    bPodeEntrar := false;
-    if (Time >= HoraInicio) and (Time < HoraUltimaEntrada) then
-      bPodeEntrar := true;
-    if nOperacoesDia >= MaxOperacoesDia then
-      bPodeEntrar := false;
-    if fResultadoDia + PerdaMaxDiaReais <= 0 then
-      bPodeEntrar := false;
-    if bPodeEntrar then
+    if ModoTeste = 1 then
     begin
-      if bSinalCompra then
+      // Teste: uma operacao por dia. COMPRA = ha dado de agressao; VENDA = nao ha.
+      if (nBarrasDia >= 2) and (nOperacoesDia = 0) then
       begin
-        BuyAtMarket;
-        nOperacoesDia := nOperacoesDia + 1;
-      end
-      else if bSinalVenda then
+        if fAgrDia > 0 then
+          BuyAtMarket
+        else
+          SellShortAtMarket;
+        nOperacoesDia := 1;
+      end;
+    end
+    else
+    begin
+      bPodeEntrar := false;
+      if (fHora >= HoraInicio) and (fHora < HoraUltimaEntrada) then
+        bPodeEntrar := true;
+      if nOperacoesDia >= MaxOperacoesDia then
+        bPodeEntrar := false;
+      if fResultadoDia + PerdaMaxDiaReais <= 0 then
+        bPodeEntrar := false;
+      if bPodeEntrar then
       begin
-        SellShortAtMarket;
-        nOperacoesDia := nOperacoesDia + 1;
+        if bSinalCompra then
+        begin
+          BuyAtMarket;
+          nOperacoesDia := nOperacoesDia + 1;
+        end
+        else if bSinalVenda then
+        begin
+          SellShortAtMarket;
+          nOperacoesDia := nOperacoesDia + 1;
+        end;
       end;
     end;
   end;
